@@ -1,0 +1,143 @@
+name: 'Enable Unprivileged User Namespaces'
+description: 'Patches the kernel so bwrap/containers work without root — adds unprivileged_userns_clone sysctl that bypasses the SELinux userns_create hook'
+
+runs:
+  using: composite
+  steps:
+    - name: Patch security_create_user_ns to add unprivileged_userns_clone sysctl
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+
+        SECURITY_C="security/security.c"
+
+        if ! [ -f "$SECURITY_C" ]; then
+          echo "[userns] ERROR: $SECURITY_C not found"
+          exit 1
+        fi
+
+        # ── Strategy 1: kernel already has unprivileged_userns_clone → ensure it defaults to 1 ──
+        if grep -q 'unprivileged_userns_clone' "$SECURITY_C" 2>/dev/null; then
+          echo "[userns] Found existing unprivileged_userns_clone in security.c, forcing default=1"
+          sed -i 's/int unprivileged_userns_clone\s*=\s*0/int unprivileged_userns_clone = 1/g' "$SECURITY_C"
+          echo "[userns] Done."
+          exit 0
+        fi
+
+        # Also check user_namespace.c in case a different vendor added it there
+        USERNS_C="kernel/user_namespace.c"
+        if grep -q 'unprivileged_userns_clone' "$USERNS_C" 2>/dev/null; then
+          echo "[userns] Found existing unprivileged_userns_clone in user_namespace.c, forcing default=1"
+          sed -i 's/int unprivileged_userns_clone\s*=\s*0/int unprivileged_userns_clone = 1/g' "$USERNS_C"
+          echo "[userns] Done."
+          exit 0
+        fi
+
+        # ── Strategy 2: patch security_create_user_ns to honour a new sysctl ──
+        #
+        # The android15-6.6 GKI adds security_create_user_ns() which calls the
+        # SELinux userns_create hook.  That hook does an AVC check against the
+        # caller's SELinux context — denying it for unlabeled processes (chroot,
+        # proot, Termux containers, etc.).
+        #
+        # We insert a short-circuit: when unprivileged_userns_clone == 1 we skip
+        # the LSM hook entirely and return 0.  Default is 1 so bwrap works
+        # out-of-the-box; admins can tighten at runtime with:
+        #   sysctl -w kernel.unprivileged_userns_clone=0
+
+        if ! grep -q 'security_create_user_ns' "$SECURITY_C"; then
+          echo "[userns] security_create_user_ns not found in $SECURITY_C — nothing to patch"
+          echo "[userns] Will attempt direct user_namespace.c CAP bypass instead"
+
+          # Last-resort: if create_user_ns calls security_create_user_ns, noop it
+          if grep -q 'security_create_user_ns' "$USERNS_C" 2>/dev/null; then
+            sed -i 's/ret = security_create_user_ns(new);\n\tif (ret < 0)/ret = 0; \/\* Wild: userns unrestricted *\/\n\tif (ret < 0)/' "$USERNS_C" || true
+            sed -i '/ret = security_create_user_ns(new);/{N; s/ret = security_create_user_ns(new);\n\tif (ret < 0)/ret = 0; \/\* Wild: userns unrestricted *\/\n\tif (0)/}' "$USERNS_C" || true
+            echo "[userns] Applied fallback no-op to security_create_user_ns call"
+          fi
+          exit 0
+        fi
+
+        echo "[userns] Patching $SECURITY_C with unprivileged_userns_clone sysctl..."
+
+        python3 - << 'PYEOF'
+import re, sys
+
+path = 'security/security.c'
+with open(path) as f:
+    src = f.read()
+
+# ── 1. Inject the sysctl variable + registration right before the function ──
+sysctl_block = '''
+/* Wild kernel: allow unprivileged user namespace creation.
+ * Set kernel.unprivileged_userns_clone=0 to re-enable LSM enforcement. */
+static int unprivileged_userns_clone = 1;
+
+#ifdef CONFIG_SYSCTL
+static struct ctl_table wild_userns_sysctls[] = {
+	{
+		.procname	= "unprivileged_userns_clone",
+		.data		= &unprivileged_userns_clone,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{ }
+};
+
+static int __init wild_userns_sysctl_init(void)
+{
+	return register_sysctl("kernel", wild_userns_sysctls) ? 0 : -ENOMEM;
+}
+late_initcall(wild_userns_sysctl_init);
+#endif /* CONFIG_SYSCTL */
+
+'''
+
+# ── 2. Replace the function body ──
+# Match: int security_create_user_ns(...) { ...any body... }
+fn_pattern = re.compile(
+    r'(int\s+security_create_user_ns\s*\([^)]*\)\s*\{)([^}]*)(\})',
+    re.DOTALL
+)
+
+def patch_fn(m):
+    signature = m.group(1)
+    old_body   = m.group(2)
+    close      = m.group(3)
+    new_body = '''
+\tif (unprivileged_userns_clone)
+\t\treturn 0;
+\treturn call_int_hook(userns_create, 0, cred);
+'''
+    return sysctl_block + signature + new_body + close
+
+new_src, n = fn_pattern.subn(patch_fn, src, count=1)
+if n == 0:
+    print('[userns] ERROR: could not find security_create_user_ns body to patch', file=sys.stderr)
+    sys.exit(1)
+
+with open(path, 'w') as f:
+    f.write(new_src)
+
+print(f'[userns] Patched {path}: unprivileged_userns_clone sysctl added (default=1)')
+PYEOF
+
+        echo "[userns] Patch applied successfully."
+
+    - name: Add kernel configs for container/namespace support
+      uses: ./.github/actions/set-kernel-config
+      with:
+        config_list: |
+          # User namespaces (bwrap / containers)
+          CONFIG_USER_NS=y
+          CONFIG_NAMESPACES=y
+          CONFIG_UTS_NS=y
+          CONFIG_IPC_NS=y
+          CONFIG_PID_NS=y
+          CONFIG_NET_NS=y
+          # Needed by bwrap for bind-mounting
+          CONFIG_OVERLAY_FS=y
