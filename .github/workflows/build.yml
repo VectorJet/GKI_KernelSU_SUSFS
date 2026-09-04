@@ -279,7 +279,10 @@ jobs:
       uses: ./.github/actions/droidspaces
       with:
         version: ${{ inputs.version }}
+        android_version: ${{ inputs.android_version }}
         kernel_version: ${{ inputs.kernel_version }}
+        os_patch_level: ${{ inputs.os_patch_level }}
+        sublevel: ${{ steps.extract.outputs.sublevel }}
         droidspaces_commit: ${{ inputs.droidspaces_commit }}
 
     - name: Apply NTSync Patches
