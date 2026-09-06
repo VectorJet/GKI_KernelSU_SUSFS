@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: GKI KernelSU SUSFS <root>
+Date: Mon Jan  1 00:00:00 2026 +0000
+Subject: [PATCH] fuse: skip blocktag hook for synchronous fuse requests
+
+MTK's blocktag vendor hook (BTMTR) emits block_io_start and
+block_io_get_result trace calls while holding fiq->lock. When the
+vendor's io-called hook needs a synchronous FUSE request (e.g. after
+statfs()/getattr()), this deadlocks: the tracing triggers a sync
+request which competes for fiq->lock (or hangs the requesting thread),
+manifesting as a hang, watchdog reset, or SoftLockup right after boot
+once userspace performs statfs() checks.
+
+Keep the vendor hook for asynchronous (background) requests only:
+reads/writes/background writeback. The crash-triggering synchronous
+userspace calls (statfs/getattr/lookup/fsync) now bypass the hook.
+
+Signed-off-by: GKI KernelSU SUSFS <root>
+diff --git a/fs/fuse/dev.c b/fs/fuse/dev.c
+index d0bf4bc..ebfc006 100644
+--- a/fs/fuse/dev.c
++++ b/fs/fuse/dev.c
+@@ -236,6 +236,14 @@ __releases(fiq->lock)
+ 		fuse_len_args(req->args->in_numargs,
+ 			      (struct fuse_arg *) req->args->in_args);
+ 	list_add_tail(&req->list, &fiq->pending);
++	/*
++	 * MTK blocktag's block_io_start/block_io_get_result trace calls
++	 * are not safe to run while holding fiq->lock, and on some devices
++	 * they trigger a synchronous request (and thus a deadlock, a hang,
++	 * or a watchdog reset) right after statfs(). Keep the vendor hook,
++	 * but only invoke it for asynchronous (background) requests.
++	 */
++	if (!sync)
+ 	trace_android_vh_queue_request_and_unlock(&fiq->waitq, sync);
+ 	fiq->ops->wake_pending_and_unlock(fiq, sync);
+ }

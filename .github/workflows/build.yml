@@ -328,6 +328,29 @@ jobs:
         version: ${{ inputs.version }}
         kernel_version: ${{ inputs.kernel_version }}
 
+    - name: Apply FUSE blocktag hook guard (fix statfs hang/reboot)
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        PATCH="${{ github.workspace }}/.github/patches/0001-fuse-skip-blocktag-hook-for-sync-fuse-requests.patch"
+        if ! grep -q 'trace_android_vh_queue_request_and_unlock(&fiq->waitq, sync);' fs/fuse/dev.c 2>/dev/null; then
+          echo "[*] FUSE blocktag hook not present in fs/fuse/dev.c, nothing to apply."
+          exit 0
+        fi
+        if grep -q "MTK blocktag's block_io_start/block_io_get_result" fs/fuse/dev.c; then
+          echo "[*] FUSE blocktag guard already applied, skipping."
+          exit 0
+        fi
+        echo "[*] Applying FUSE blocktag guard: $PATCH"
+        if ! patch -p1 --dry-run -f -F0 < "$PATCH"; then
+          echo "::error::FUSE blocktag guard patch FAILED to apply. Context around queue_request_and_unlock:"
+          grep -n -A 16 -B 3 'queue_request_and_unlock(struct fuse_iqueue' fs/fuse/dev.c || true
+          exit 1
+        fi
+        patch -p1 -f -F0 < "$PATCH"
+        echo "[+] FUSE blocktag guard applied."
+
     - name: Integrate NoMount
       if: inputs.nomount_commit != '' || contains(inputs.feature_set, 'NoMount') || inputs.feature_set == 'All'
       uses: ./.github/actions/nomount
