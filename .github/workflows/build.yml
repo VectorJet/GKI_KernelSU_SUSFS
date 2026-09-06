@@ -170,6 +170,16 @@ jobs:
         sublevel: ${{ steps.extract.outputs.sublevel }}
         os_patch_level: ${{ inputs.os_patch_level }}
 
+    - name: Harden pstore/ramoops config (crash capture safety net)
+      uses: ./.github/actions/set-kernel-config
+      with:
+        config_list: |
+          CONFIG_PSTORE=y
+          CONFIG_PSTORE_CONSOLE=y
+          CONFIG_PSTORE_PMSG=y
+          CONFIG_PSTORE_RAM=y
+          CONFIG_PSTORE_DEFAULT_KMSG_BYTES=65536
+
     - name: Setup Selected Root Implementation
       if: inputs.root_flavor != ''
       uses: ./.github/actions/root-setup
