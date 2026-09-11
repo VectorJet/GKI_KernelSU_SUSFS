@@ -1,0 +1,42 @@
+name: Build Plain DS Kernel (Magisk, no root)
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      os_patch_level:
+        description: "Patch date (must match your stock kernel sublevel)"
+        required: true
+        type: string
+        default: "2026-04"
+      brand_name:
+        description: "Kernel branding"
+        required: false
+        type: string
+        default: "Plain-DS"
+      use_cache:
+        description: "Use bazel cache"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  build-plain-ds:
+    uses: ./.github/workflows/prepare.yml
+    with:
+      config_file: .github/config/android15-6.6.json
+      feature_set: DS
+      root_flavor: ""
+      root_commit: ""
+      susfs_commit: ""
+      nomount_commit: ""
+      kernel_patches_commit: ""
+      anykernel3_commit: ""
+      droidspaces_commit: ""
+      brand_name: ${{ inputs.brand_name }}
+      os_patch_level: ${{ inputs.os_patch_level }}
+      use_cache: ${{ inputs.use_cache }}
+    secrets: inherit
