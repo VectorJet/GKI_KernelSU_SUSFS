@@ -4,40 +4,31 @@ Date: Mon Jan  1 00:00:00 2026 +0000
 Subject: [PATCH] fuse: disable MTK blocktag vendor hook entirely
 
 MTK's blocktag vendor hook (BTMTR) emits block_io_start and
-block_io_get_result trace calls while holding fiq->lock. When the
-vendor's io-called hook needs a synchronous FUSE request (e.g. after
-statfs()/getattr()), this deadlocks: the tracing triggers a sync
-request which competes for fiq->lock (or hangs the requesting thread),
-manifesting as a hang, watchdog reset, or SoftLockup right after boot
-once userspace performs statfs() checks.
-
-Additionally, on MT6893/lyriq the hook itself crashes: under container
-FUSE activity (fuse_file_put -> fuse_simple_background -> flush_bg_queue
--> queue_request_and_unlock) btag_fuse_queue_request_and_unlock performs
-a write to read-only memory (level 3 permission fault, ESR 0x9600004f),
-causing "Kernel panic - not syncing: Oops: Fatal exception" and a
-random reboot. The hook is kept for neither sync nor async requests:
-FUSE is not block I/O, so losing blocktag QoS tagging here is harmless.
+block_io_get_result trace calls while holding fiq->lock, risking
+deadlock after sync FUSE requests (statfs/getattr). Worse, on
+MT6893/lyriq the hook writes to read-only memory on background
+requests (fuse_file_put -> flush_bg_queue), panicking the kernel
+(Oops, ESR 0x9600004f) and rebooting under container FUSE load.
+Disabled for all FUSE requests via if (false), removed by DCE.
+FUSE is not block I/O, so no QoS tagging is lost.
 
 Signed-off-by: GKI KernelSU SUSFS <root>
 diff --git a/fs/fuse/dev.c b/fs/fuse/dev.c
 index d0bf4bc..ebfc006 100644
 --- a/fs/fuse/dev.c
 +++ b/fs/fuse/dev.c
-@@ -236,5 +236,14 @@ __releases(fiq->lock)
+@@ -236,6 +236,14 @@ __releases(fiq->lock)
  		fuse_len_args(req->args->in_numargs,
  			      (struct fuse_arg *) req->args->in_args);
  	list_add_tail(&req->list, &fiq->pending);
--	trace_android_vh_queue_request_and_unlock(&fiq->waitq, sync);
 +	/*
 +	 * MTK blocktag's block_io_start/block_io_get_result trace calls
-+	 * are not safe to run while holding fiq->lock (deadlock/hang after
-+	 * statfs()), and on some devices the hook writes to read-only
-+	 * memory on background requests, panicking the kernel. The vendor
-+	 * hook is therefore disabled for all FUSE requests. FUSE is not
-+	 * block I/O, so no QoS tagging is lost.
-+	 *
-+	 * Disabled: trace_android_vh_queue_request_and_unlock(&fiq->waitq, sync);
++	 * are not safe under fiq->lock and write to read-only memory on
++	 * background requests (panic). Disabled for all FUSE requests;
++	 * FUSE is not block I/O, so no QoS tagging is lost. Panic was
++	 * btag_fuse_queue_request_and_unlock+0x310, ESR 0x9600004f.
 +	 */
++	if (false)
+ 	trace_android_vh_queue_request_and_unlock(&fiq->waitq, sync);
  	fiq->ops->wake_pending_and_unlock(fiq, sync);
  }
