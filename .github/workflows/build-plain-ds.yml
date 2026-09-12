@@ -17,6 +17,11 @@ on:
         required: false
         type: string
         default: "Plain-DS"
+      feature_set:
+        description: "Feature set (DS enables DroidSpaces; empty = no features, for bisecting)"
+        required: false
+        type: string
+        default: "DS"
       use_cache:
         description: "Use bazel cache"
         required: false
@@ -28,7 +33,7 @@ jobs:
     uses: ./.github/workflows/prepare.yml
     with:
       config_file: .github/config/android15-6.6.json
-      feature_set: DS
+      feature_set: ${{ inputs.feature_set }}
       root_flavor: ""
       root_commit: ""
       susfs_commit: ""
